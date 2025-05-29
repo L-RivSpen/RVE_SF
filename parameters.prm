@@ -1,0 +1,36 @@
+# Parameter file for the RVE homogenization program
+# Each subsection corresponds to a parameter group used in the code.
+
+subsection Finite element system
+  set Polynomial degree = 2
+  set Quadrature order = 3
+end
+
+subsection Geometry
+  set Global refinement = 3
+  set Grid scale = 1e-3
+end
+
+subsection Material properties
+  set Poisson's ratio = 0.40
+  set Shear modulus = 80.194e6
+end
+
+subsection Linear solver
+  set Solver type = CG
+  set Max iteration multiplier = 100
+  set Preconditioner type = ssor
+  set Preconditioner relaxation = 0.5
+end
+
+subsection Nonlinear solver
+  set Max iterations Newton-Raphson = 250
+  set Tolerance force = 1.0e-9
+  set Tolerance displacement = 1.0e-6
+end
+
+subsection Time
+  set End time = 1
+  set Time step size = 0.1
+end
+
