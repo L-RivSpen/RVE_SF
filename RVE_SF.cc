@@ -197,7 +197,6 @@ struct LinearSolver
     std::string type_lin;
     double      tol_lin;
     double      max_iterations_lin;
-    bool        use_static_condensation;
     std::string preconditioner_type;
     double      preconditioner_relaxation;
 
@@ -212,11 +211,11 @@ void LinearSolver::declare_parameters(ParameterHandler &prm)
     {
         prm.declare_entry("Solver type",
                           "CG",
-                          Patterns::Selection("CG|Direct"),
+                          Patterns::Selection("CG|Direct|Other"),
                           "Type of solver used to solve the linear system");
         
         prm.declare_entry("Residual",
-                          "1e-5",
+                          "1e-6",
                           Patterns::Double(0.0),
                           "Linear solver residual (scaled by residual norm)");
 
@@ -224,11 +223,6 @@ void LinearSolver::declare_parameters(ParameterHandler &prm)
                           "1",
                           Patterns::Double(0.0),
                           "Linear solver iterations (multiples of the system matrix size)");
-
-        prm.declare_entry("Use static condensation",
-                          "true",
-                          Patterns::Bool(),
-                          "Solve the full block system or a reduced problem");
         
         prm.declare_entry("Preconditioner type",
                           "ssor",
@@ -250,7 +244,6 @@ void LinearSolver::parse_parameters(ParameterHandler &prm)
         type_lin = prm.get("Solver type");
         tol_lin = prm.get_double("Residual");
         max_iterations_lin = prm.get_double("Max iteration multiplier");
-        use_static_condensation = prm.get_bool("Use static condensation");
         preconditioner_type = prm.get("Preconditioner type");
         preconditioner_relaxation = prm.get_double("Preconditioner relaxation");
     }
@@ -335,6 +328,44 @@ void Time::parse_parameters(ParameterHandler &prm)
     prm.leave_subsection();
 }
 
+// Code Parameters
+struct Code
+{
+    bool terminal_output_mode;
+    bool file_output_mode;
+
+    static void declare_parameters(ParameterHandler &prm);
+
+    void parse_parameters(ParameterHandler &prm);
+};
+
+void Code::declare_parameters(ParameterHandler &prm)
+{
+    prm.enter_subsection("Code");
+    {
+        prm.declare_entry("Terminal Output",
+                          "true",
+                          Patterns::Bool(),
+                          "Enables or disables debugging outputs in terminal");
+
+        prm.declare_entry("File Output",
+                          "true",
+                          Patterns::Bool(),
+                          "Enables or disables files for debugging outputs");
+    }
+    prm.leave_subsection();
+}
+
+void Code::parse_parameters(ParameterHandler &prm)
+{
+    prm.enter_subsection("Code");
+    {
+        terminal_output_mode = prm.get_bool("Terminal Output");
+        file_output_mode     = prm.get_bool("File Output");
+    }
+    prm.leave_subsection();
+}
+
 
 // All Parameters
 
@@ -343,7 +374,8 @@ struct AllParameters : public FESystem,
                        public Materials, 
                        public LinearSolver, 
                        public NonlinearSolver,
-                       public Time
+                       public Time,
+                       public Code
 
 {
 
@@ -374,6 +406,7 @@ void AllParameters::declare_parameters(ParameterHandler &prm)
     LinearSolver::declare_parameters(prm);
     NonlinearSolver::declare_parameters(prm);
     Time::declare_parameters(prm);
+    Code::declare_parameters(prm);
 }
 
 void AllParameters::parse_parameters(ParameterHandler &prm)
@@ -384,6 +417,8 @@ void AllParameters::parse_parameters(ParameterHandler &prm)
     LinearSolver::parse_parameters(prm);
     NonlinearSolver::parse_parameters(prm);    
     Time::parse_parameters(prm);
+    Code::parse_parameters(prm);
+
 }
 
 // Parameter Console Output 
@@ -421,8 +456,7 @@ void AllParameters::print_parameters()
     {
         std::cout << "Solver Type = " << type_lin << '\n'
         << "Residual = " << tol_lin << '\n' 
-        << "Max Iteration Multiplier = " << max_iterations_lin << '\n' 
-        << "Use Static Condensation = " << use_static_condensation << '\n' 
+        << "Max Iteration Multiplier = " << max_iterations_lin << '\n'  
         << "Preconditioner Type = " << preconditioner_type << '\n'
         << "Preconditioner Relaxation = " << preconditioner_relaxation << std::endl; 
     }
@@ -442,6 +476,14 @@ void AllParameters::print_parameters()
     {
         std::cout << "End Time = " << end_time << '\n'
         << "Time Step Size = " << delta_t << std::endl;     
+    }
+    prm.leave_subsection();
+
+    // Psuedo Code
+    prm.enter_subsection("Code");
+    {
+        std::cout << "Terminal Output = " << terminal_output_mode << '\n'
+        << "File Output = " << file_output_mode << std::endl;     
     }
     prm.leave_subsection();
 
@@ -497,7 +539,7 @@ private:
         NumberType SEF_iso = c_1 * (tr_b - 3.0);
 
         // Total Response
-        return SEF_iso;
+        return SEF_iso + SEF_vol;
     }
 
     // AD function to compute SEF and derivatives
@@ -558,26 +600,6 @@ private:
                         mat_tangent[i][j][k][l] = ddPsi_dF2(row, col);
                     }
             }
-
-        // Output results
-        /*
-        //std::cout << "First Piola Kirchhoff Stress P (dPsi/dF): " << std::endl;
-        for (unsigned int i = 0; i < dim; ++i)
-        {
-            for (unsigned int j = 0; j < dim; ++j);
-                std::cout << P[i][j] << " ";
-            std::cout << std::endl;
-        }
-
-        for (unsigned int i = 0; i < dim; ++i)
-            for (unsigned int j = 0; j < dim; ++j)
-                for (unsigned int k = 0; k < dim; ++k)
-                    for (unsigned int l = 0; l < dim; ++l)
-                    {
-                        std::cout << "A[" << i << "][" << j << "][" << k << "][" << l << "] = "
-                                  << mat_tangent[i][j][k][l] << std::endl;
-                    }
-        */
     }
 
     // Deformation
@@ -636,32 +658,6 @@ private:
   const double delta_t;
 };
 
-// Resultant Strain Class
-template <int dim>
-class MacroDisplacement : public Function<dim>
-{
-public:
-  MacroDisplacement(const Tensor<2,dim> &F_)
-    : Function<dim>(dim)
-    , F(F_)
-  {}
-
-  virtual void
-  vector_value(const Point<dim> &p,
-               Vector<double>  &values) const override
-  {
-    Assert(values.size() == dim,
-           ExcDimensionMismatch(values.size(), dim));
-
-    // first write u = F * p
-    Tensor<1,dim> u = F * p;
-    for (unsigned int d = 0; d < dim; ++d)
-      values[d] = u[d];
-  }
-
-private:
-  Tensor<2,dim> F;
-};
 
 
 // Problem class
@@ -770,7 +766,7 @@ void RVE_SF<dim>::make_grid()
 
     std::cout << "Mesh Generated" << std::endl;
 
-    // Boundary Flagging
+    // Boundary Flagging For Periodic Constraints
     for (const auto &cell : triangulation.active_cell_iterators())
         for (unsigned int f = 0; f < 4;++f) // Fix
             if (cell->face(f)->at_boundary())
@@ -800,13 +796,17 @@ void RVE_SF<dim>::make_grid()
                 {
                     cell->face(f)->set_boundary_id(3); // top
                 }
-            }
-    for (const auto &cell : triangulation.active_cell_iterators())
-    for (unsigned int f=0; f<GeometryInfo<dim>::faces_per_cell; ++f)
-        if (cell->face(f)->at_boundary());
-            //std::cout << "Face at " << cell->face(f)->center()
-            //          << " has boundary id " << cell->face(f)->boundary_id() << std::endl;
 
+                if(parameters.terminal_output_mode)
+                {
+                for (const auto &cell : triangulation.active_cell_iterators())
+                    for (unsigned int f=0; f<GeometryInfo<dim>::faces_per_cell; ++f)
+                        if (cell->face(f)->at_boundary());
+                            std::cout << "Face at " << cell->face(f)->center()
+                                    << " has boundary id " << cell->face(f)->boundary_id() << std::endl;
+                }
+            }
+    
     
 }
 
@@ -832,31 +832,33 @@ void RVE_SF<dim>::setup_system()
     system_rhs.reinit(dof_handler.n_dofs());
     solution = 0;
 
-{
+    if(parameters.file_output_mode)
+    {
     // Map DoFs to their support points
     const std::map<dealii::types::global_dof_index, dealii::Point<2>>
         dof_location_map = dealii::DoFTools::map_dofs_to_support_points(
             dealii::MappingQ1<2>(), dof_handler);
 
+
     // Write to file in gnuplot format
     std::ofstream dof_location_file("dof_numbering.gnuplot");
     dealii::DoFTools::write_gnuplot_dof_support_point_info(dof_location_file, dof_location_map);
     std::cout << "Wrote DoF support point info to dof_numbering.gnuplot" << std::endl;
+    }
 }
-}
+
 
 template <int dim>
 void RVE_SF<dim>::apply_boundary_conditions()
 {
+    constraints.clear();
 
     std::cout << "Applying Boundary Conditions For Time: " << time.current() << std::endl;
-    
-    constraints.clear();
 
     std::vector<Point<dim>> support_points(dof_handler.n_dofs());
     DoFTools::map_dofs_to_support_points(MappingQ1<dim>(), dof_handler, support_points);
 
-    //std::cout << " - Fixing Node" << std::endl;
+    std::cout << " - Fixing Required Components" << std::endl;
 
     std::vector<unsigned int> anchor_dofs;
 
@@ -873,12 +875,14 @@ void RVE_SF<dim>::apply_boundary_conditions()
     {
         unsigned int dof = anchor_dof_1 + d;
         
-        //std::cout << "Fixing anchor dof " << dof << std::endl;
         anchor_dofs.push_back(dof);
-
         constraints.add_line(dof);
         constraints.set_inhomogeneity(dof, 0);
-        std::cout << dof << std::endl;
+        
+        if (parameters.terminal_output_mode)
+        {
+        std::cout << "Fixing anchor dof " << dof << std::endl;
+        }
     }
 
     // Fixing 1 Component of node two
@@ -886,18 +890,18 @@ void RVE_SF<dim>::apply_boundary_conditions()
     unsigned int anchor_dof_2;
     for (unsigned int i = 0; i < support_points.size(); ++i)
         if (support_points[i].distance(anchor_point_2) < 1e-12)
-            anchor_dof_2 = 514;
+            anchor_dof_2 = 6; // GR = 4: 2050, GR = 2: 130
     
-    for (unsigned int d = 0; d < dim-1; ++d)
+    for (unsigned int d = 0; d < dim; ++d)
     {
         unsigned int dof = anchor_dof_2 + d;
         
-        //std::cout << "Fixing anchor dof " << dof << std::endl;
+        if (parameters.terminal_output_mode)
+        std::cout << "Fixing anchor dof " << dof << std::endl;
+        
         anchor_dofs.push_back(dof);
-
         constraints.add_line(dof);
         constraints.set_inhomogeneity(dof, 0);
-        std::cout << dof << std::endl;
     }
 
 
@@ -907,15 +911,33 @@ void RVE_SF<dim>::apply_boundary_conditions()
 
     Tensor<2, dim> applied_strain;
     double time_ratio = time.current() / time.end();
-    double strain_max = 0.001;
-    applied_strain[0][0] = strain_max * 0.025; //* time_ratio;     
-    //applied_strain[1][0] = -strain_max * 0.025; //* time_ratio;  
+    double strain_max = 0.02;
+    applied_strain[0][0] = strain_max; //* time_ratio;     
+    applied_strain[1][0] = strain_max; //* time_ratio;   
+    applied_strain[0][1] = strain_max; //* time_ratio;   
+    applied_strain[1][1] = strain_max; //* time_ratio;  
+
+    /*
+    constraints.add_line( 2);
+    constraints.set_inhomogeneity(/2, -2e-5);
+
+    constraints.add_line(3);
+    constraints.set_inhomogeneity( 3, -2e-5);
+
+    constraints.add_line( 4);
+    constraints.set_inhomogeneity( 4, -2e-5);
+    constraints.add_line(5);
+    constraints.set_inhomogeneity( 5, -2e-5);
+    */
 
 
     // holy nested list...
 
     if (time.current() == 0)
     {
+    
+    std::set<std::pair<unsigned int, unsigned int>> constrained_keys;
+
     for (const auto &cell_master : dof_handler.active_cell_iterators())
         for (unsigned int fm = 0; fm < 4; ++fm)
             if (cell_master->face(fm)->at_boundary())
@@ -948,10 +970,13 @@ void RVE_SF<dim>::apply_boundary_conditions()
                                             cell_master->get_dof_indices(master_dof_indices);
                                             cell_slave->get_dof_indices(slave_dof_indices);
 
-                                            for (unsigned int i= 0; i < fe.n_dofs_per_face(); ++i)
+                                            for (unsigned int i = 0 ; i < fe.n_dofs_per_face(); ++i)
                                             {
                                                 unsigned int master_dof = master_dof_indices[fe.face_to_cell_index(i, fm)];
                                                 unsigned int slave_dof = slave_dof_indices[fe.face_to_cell_index(i, fs)];
+                                                unsigned int comp = master_dof % dim;
+
+
 
                                                 if (std::find(anchor_dofs.begin(), anchor_dofs.end(), master_dof) != anchor_dofs.end() || 
                                                     std::find(anchor_dofs.begin(), anchor_dofs.end(), slave_dof) != anchor_dofs.end())
@@ -961,33 +986,39 @@ void RVE_SF<dim>::apply_boundary_conditions()
                                                 }
                                                 else
                                                 {
-                                                unsigned int comp = master_dof % dim;
+
+                                                auto master_key = std::make_pair(master_dof, comp);
+                                                auto slave_key = std::make_pair(slave_dof, comp);
+                                                if (constrained_keys.count(slave_key) || constrained_keys.count(master_key)) continue; // already constrained, skip
+
+
+
 
                                                 // Storing matched dofs
-                                                x_m_dofs.push_back(master_dof);
-                                                x_s_dofs.push_back(slave_dof);
+                                                y_m_dofs.push_back(master_dof);
+                                                y_s_dofs.push_back(slave_dof);
 
                                                 // Grabbing points 
-
                                                 const Point<dim> point_m = support_points[master_dof];
                                                 const Point<dim> point_s = support_points[slave_dof];
 
                                                 // Computing rhs
                                                 double rhs = (applied_strain * (point_m - point_s))[comp];
 
-                                                /*
-                                                std::cout << "Periodic pair: point_m = " << point_m
-                                                    << ", point_s = " << point_s
-                                                    << ", diff = " << (point_m - point_s)
-                                                    << ", rhs = " << rhs << std::endl;
-                                                */
-
-                                                // Constraining Eqution
-                                                //std::cout << "Constraining master_dof " << master_dof << " to slave_dof " << slave_dof << std::endl;
-
                                                 constraints.add_line(master_dof);
                                                 constraints.add_entry(master_dof, slave_dof, 1.0);
                                                 constraints.set_inhomogeneity(master_dof, rhs);
+
+                                                constrained_keys.insert(master_key); // mark as constrained
+                                                constrained_keys.insert(slave_key); 
+
+                                                if(parameters.terminal_output_mode)
+                                                std::cout << "Periodic pair: point_m = " << master_dof
+                                                        << ", point_s = " << slave_dof
+                                                        << ", comp = " << comp 
+                                                        << ", diff = " << (point_m - point_s)
+                                                        << ", rhs = " << rhs << std::endl;
+
                                                 }
                                             }
 
@@ -1024,6 +1055,9 @@ void RVE_SF<dim>::apply_boundary_conditions()
                                             {
                                                 unsigned int master_dof = master_dof_indices[fe.face_to_cell_index(i, fm)];
                                                 unsigned int slave_dof = slave_dof_indices[fe.face_to_cell_index(i, fs)];
+                                                unsigned int comp = master_dof % dim;
+
+
 
                                                 if (std::find(anchor_dofs.begin(), anchor_dofs.end(), master_dof) != anchor_dofs.end() || 
                                                     std::find(anchor_dofs.begin(), anchor_dofs.end(), slave_dof) != anchor_dofs.end())
@@ -1033,7 +1067,12 @@ void RVE_SF<dim>::apply_boundary_conditions()
                                                 }
                                                 else
                                                 {
-                                                unsigned int comp = master_dof % dim;
+
+                                                auto master_key = std::make_pair(master_dof, comp);
+                                                auto slave_key = std::make_pair(slave_dof, comp);
+                                                if (constrained_keys.count(slave_key) || constrained_keys.count(master_key)) continue; // already constrained, skip
+
+
 
 
                                                 // Storing matched dofs
@@ -1047,13 +1086,20 @@ void RVE_SF<dim>::apply_boundary_conditions()
                                                 // Computing rhs
                                                 double rhs = (applied_strain * (point_m - point_s))[comp];
 
-
-                                                // Constraining Eqution
-                                                //std::cout << "Constraining master_dof " << master_dof << " to slave_dof " << slave_dof << std::endl;
-
                                                 constraints.add_line(master_dof);
                                                 constraints.add_entry(master_dof, slave_dof, 1.0);
                                                 constraints.set_inhomogeneity(master_dof, rhs);
+
+                                                constrained_keys.insert(master_key); // mark as constrained
+                                                constrained_keys.insert(slave_key); 
+
+                                                if(parameters.terminal_output_mode)
+                                                std::cout << "Periodic pair: point_m = " << master_dof
+                                                        << ", point_s = " << slave_dof
+                                                        << ", comp = " << comp 
+                                                        << ", diff = " << (point_m - point_s)
+                                                        << ", rhs = " << rhs << std::endl;
+
                                                 }
                                             }
 
@@ -1068,38 +1114,15 @@ void RVE_SF<dim>::apply_boundary_conditions()
     }
     else
     {
-        /*
+        if (parameters.terminal_output_mode)
+        {
         std::cout << "x_m_dofs.size() = " << x_m_dofs.size() << std::endl;
         std::cout << "x_s_dofs.size() = " << x_s_dofs.size() << std::endl;
         std::cout << "y_m_dofs.size() = " << y_m_dofs.size() << std::endl;
         std::cout << "y_s_dofs.size() = " << y_s_dofs.size() << std::endl;
-        */
-
-
-
-        std::vector<Point<dim>> deformed_support_points(support_points.size());
-
-        for (unsigned int i = 0; i < support_points.size(); ++i)
-        {
-            deformed_support_points[i] = support_points[i];
-            unsigned int comp=0;
-            if (i < support_points.size()/2)
-            {
-                comp = 0;
-            }
-            else
-            {
-                comp = 1;
-            }
-
-            deformed_support_points[i][comp] += solution[i];
-        }
-
-
-
-
         std::cout << "Solution Vector Size:" << solution.size() << std::endl;
-        std::cout << "Deformed support point vector Size: " << deformed_support_points.size() << std::endl;
+        std::cout << "Deformed support point vector Size: " << support_points.size() << std::endl;
+        }
 
         std::set<std::pair<unsigned int, unsigned int>> constrained_keys;
 
@@ -1121,17 +1144,6 @@ void RVE_SF<dim>::apply_boundary_conditions()
                 // Computing rhs
                 double rhs = (applied_strain * (point_m - point_s))[comp];
 
-                /*
-                std::cout << "Periodic pair: point_m = " << master_dof
-          << ", point_s = " << slave_dof
-          << ", comp = " << comp 
-          << ", diff = " << (point_m - point_s)
-          << ", rhs = " << rhs << std::endl;
-                */
-
-                // Constraining Eqution
-                //std::cout << "Constraining master_dof " << master_dof << " to slave_dof " << slave_dof << std::endl;
-
                 constraints.add_line(master_dof);
                 constraints.add_entry(master_dof, slave_dof, 1.0);
                 constraints.set_inhomogeneity(master_dof, rhs);
@@ -1139,13 +1151,20 @@ void RVE_SF<dim>::apply_boundary_conditions()
                 constrained_keys.insert(master_key); // mark as constrained
                 constrained_keys.insert(slave_key); 
 
+                if(parameters.terminal_output_mode)
+                std::cout << "Periodic pair: point_m = " << master_dof
+                          << ", point_s = " << slave_dof
+                          << ", comp = " << comp 
+                          << ", diff = " << (point_m - point_s)
+                          << ", rhs = " << rhs << std::endl;
+
             }
 
         for (unsigned int idx = 0 ; idx < y_m_dofs.size() ; ++idx)
             {
                 
-                unsigned int master_dof = y_m_dofs[idx];
-                unsigned int slave_dof = y_s_dofs[idx];
+                unsigned int master_dof = x_m_dofs[idx];
+                unsigned int slave_dof = x_s_dofs[idx];
 
                 unsigned int comp = master_dof % dim;
                 const Point<dim> point_m = support_points[master_dof];
@@ -1158,37 +1177,36 @@ void RVE_SF<dim>::apply_boundary_conditions()
                 // Computing rhs
                 double rhs = (applied_strain * (point_m - point_s))[comp];
 
-                /*
-                std::cout << "Periodic pair: point_m = " << master_dof
-          << ", point_s = " << slave_dof
-          << ", comp = " << comp 
-          << ", diff = " << (point_m - point_s)
-          << ", rhs = " << rhs << std::endl;
-                */
-                // Constraining Eqution
-                //std::cout << "Constraining master_dof " << master_dof << " to slave_dof " << slave_dof << std::endl;
-
                 constraints.add_line(master_dof);
                 constraints.add_entry(master_dof, slave_dof, 1.0);
                 constraints.set_inhomogeneity(master_dof, rhs);
 
                 constrained_keys.insert(master_key); // mark as constrained
                 constrained_keys.insert(slave_key); 
+
+                if(parameters.terminal_output_mode)
+                std::cout << "Periodic pair: point_m = " << master_dof
+                          << ", point_s = " << slave_dof
+                          << ", comp = " << comp 
+                          << ", diff = " << (point_m - point_s)
+                          << ", rhs = " << rhs << std::endl;
             }          
     }
+
+    if(parameters.terminal_output_mode)
     std::cout << "    Number of Constraints: " << constraints.n_constraints() << std::endl;
 
     constraints.close();
+
+    std::ofstream out("constraints.txt");
+    constraints.print(out);
+
+
     
     DynamicSparsityPattern dsp(dof_handler.n_dofs());
     DoFTools::make_sparsity_pattern(dof_handler, dsp, constraints, true);
     sparsity_pattern.copy_from(dsp);
     tangent_matrix.reinit(sparsity_pattern);
-
-
-
-
-
 }
 
 template <int dim>
@@ -1253,7 +1271,7 @@ void RVE_SF<dim>::assemble_system()
 
                     
 
-                        
+                        if(parameters.terminal_output_mode)
                         {
                         //std::cout << "Tangent: " << tangent_contribution * fe_values.JxW(q_index) << " at ( " << i << " , " << j << " )" << std::endl;
                         //std::cout << "Det F: " << determinant(F) << " at ( " << i << " , " << j << " )" << std::endl;
@@ -1276,7 +1294,9 @@ void RVE_SF<dim>::assemble_system()
 
     constraints.condense(tangent_matrix, system_rhs);
 
-    // Output the assembled tangent matrix for inspection
+    if(parameters.file_output_mode)
+    {
+    //Output the assembled tangent matrix for inspection
     // After assembling tangent_matrix:
     dealii::MatrixOut matrix_out;
 
@@ -1287,58 +1307,41 @@ void RVE_SF<dim>::assemble_system()
 
     matrix_out.write_vtk(matrix_file);
     std::cout << "Wrote tangent_matrix.vtk for inspection." << std::endl;
+    
 
-    /*
-    // Print the first 10 entries of the global RHS vector
-std::cout << "system_rhs (first 10 entries): ";
-for (unsigned int i = 0; i < std::min<unsigned int>(10, system_rhs.size()); ++i)
-    std::cout << system_rhs[i] << " ";
-std::cout << std::endl;
-
-// Optionally, print the max and min values for a quick sanity check
-double rhs_max = system_rhs.linfty_norm();
-double rhs_min = (system_rhs.size() > 0) ? system_rhs[0] : 0.0;
-for (unsigned int i = 1; i < system_rhs.size(); ++i)
-    if (system_rhs[i] < rhs_min) rhs_min = system_rhs[i];
-std::cout << "system_rhs: min = " << rhs_min << ", max = " << rhs_max << std::endl;
-    */
-
-// Export tangent matrix in COO format for Python (one file per time step)
-{
-    std::ostringstream fname;
-    fname << "tangent_matrix_" << time.get_timestep() << ".txt";
-    std::ofstream matrix_out(fname.str());
+    // Export tangent matrix in COO format for Python (one file per time step)
+    std::ostringstream fname_2;
+    fname_2 << "tangent_matrix_" << time.get_timestep() << ".txt";
+    std::ofstream matrix_out_txt(fname_2.str());
     for (unsigned int i = 0; i < tangent_matrix.m(); ++i)
         for (dealii::SparseMatrix<double>::const_iterator it = tangent_matrix.begin(i); it != tangent_matrix.end(i); ++it)
-            matrix_out << it->row() << " " << it->column() << " " << it->value() << "\n";
-}
+            matrix_out_txt << it->row() << " " << it->column() << " " << it->value() << "\n";
 
-// Export RHS vector (one file per time step)
-{
-    std::ostringstream fname;
-    fname << "system_rhs_" << time.get_timestep() << ".txt";
-    std::ofstream rhs_out(fname.str());
+    // Export RHS vector (one file per time step)
+    std::ostringstream fname_3;
+    fname_3 << "system_rhs_" << time.get_timestep() << ".txt";
+    std::ofstream rhs_out(fname_3.str());
     for (unsigned int i = 0; i < system_rhs.size(); ++i)
         rhs_out << system_rhs[i] << "\n";
-}
+    }
 
-bool found_nonfinite = false;
-for (unsigned int i=0; i<tangent_matrix.m(); ++i)
-    for (auto it = tangent_matrix.begin(i); it != tangent_matrix.end(i); ++it)
-        if (!std::isfinite(it->value())) {
-            std::cout << "Non-finite matrix entry at (" << it->row() << ", " << it->column() << "): " << it->value() << std::endl;
+    if(parameters.terminal_output_mode)
+    {
+    bool found_nonfinite = false;
+    for (unsigned int i=0; i<tangent_matrix.m(); ++i)
+        for (auto it = tangent_matrix.begin(i); it != tangent_matrix.end(i); ++it)
+            if (!std::isfinite(it->value())) {
+                std::cout << "Non-finite matrix entry at (" << it->row() << ", " << it->column() << "): " << it->value() << std::endl;
+                found_nonfinite = true;
+            }
+    for (unsigned int i=0; i<system_rhs.size(); ++i)
+        if (!std::isfinite(system_rhs[i])) {
+            std::cout << "Non-finite RHS entry at " << i << ": " << system_rhs[i] << std::endl;
             found_nonfinite = true;
         }
-for (unsigned int i=0; i<system_rhs.size(); ++i)
-    if (!std::isfinite(system_rhs[i])) {
-        std::cout << "Non-finite RHS entry at " << i << ": " << system_rhs[i] << std::endl;
-        found_nonfinite = true;
+    if (found_nonfinite)
+        std::cout << "ERROR: Non-finite entries detected in system matrix or RHS!" << std::endl;
     }
-if (found_nonfinite)
-    std::cout << "ERROR: Non-finite entries detected in system matrix or RHS!" << std::endl;
-
-
-
 }
 
 template <int dim>
@@ -1355,7 +1358,16 @@ void RVE_SF<dim>::solve_linear_system()
     direct.initialize(tangent_matrix);
     direct.vmult(solution_increment, system_rhs);
   }
-
+  else if (parameters.type_lin == "CG")
+  {
+        SolverControl solver_control(dof_handler.n_dofs() * parameters.max_iterations_lin,
+                                     parameters.tol_lin * system_rhs.l2_norm());
+        SolverCG<Vector<double>> cg(solver_control);
+        PreconditionSSOR<SparseMatrix<double>> prec;
+        prec.initialize(tangent_matrix, parameters.preconditioner_relaxation);
+        cg.solve(tangent_matrix, solution_increment, system_rhs, prec);
+        std::cout << " - CG took " << solver_control.last_step() << " iterations\n";
+  }
     else
     {
         SolverControl solver_control(dof_handler.n_dofs() * parameters.max_iterations_lin,
