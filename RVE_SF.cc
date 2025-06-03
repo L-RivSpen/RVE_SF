@@ -42,6 +42,7 @@
 #include <deal.II/lac/precondition.h>                     //
 #include <deal.II/lac/precondition_selector.h>            // needed for preconditioners
 #include <deal.II/lac/solver_cg.h>                        // Solver Conjugate gradient
+#include <deal.II/lac/solver_gmres.h>                     //
 #include <deal.II/lac/solver_minres.h>                    // Uses Minres
 #include <deal.II/lac/solver_control.h>                   // needed for solver controls
 #include <deal.II/lac/solver_selector.h>                  // Solver selector
@@ -519,28 +520,16 @@ public:
     Tensor<2, dim> analytical_P()
     {
         const double J     = determinant(F);
-        const double Jm23  = std::pow(J, -2.0/dim);
-
         const Tensor<2,dim>  b  = F * transpose(F);
         const double         I1 = trace(b);
-
-
-        //std::cout << J << std::endl;
-        // Inverse and its transpose
         const Tensor<2,dim> F_invT = transpose(invert(F));
-        //std::cout << F_invT << std::endl;
         
-
         // Isochoric part
-        Tensor<2,dim> P_iso = 2.0 * c_1 *
-                                (Jm23 * F - (I1/dim)*Jm23 * F_invT);
+        Tensor<2,dim> P_iso = 2.0 * c_1 * F;
 
         // Volumetric part
-        const double p_vol = 0.5 * kappa * (J*J - 1.0);     // prefactor
+        const double p_vol = 0.5 * kappa * (J*J - 1.0);
         Tensor<2,dim> P_vol = p_vol * F_invT;
-
-        //std::cout << P_iso + P_vol << std::endl;
-
 
         return P_iso + P_vol;
     }
@@ -552,49 +541,47 @@ public:
 
     Tensor<4, dim> analytical_mat()
     {
-         const double J     = determinant(F);
-        const double Jm23  = std::pow(J, -2.0/dim);
+        // Compute J = det(F) and F^{-T}.
+        const double       J      = determinant(F);
+        const Tensor<2, dim> F_inv = invert(F);
+        Tensor<2, dim>     F_invT;
+        for (unsigned int i = 0; i < dim; ++i)
+            for (unsigned int j = 0; j < dim; ++j)
+            F_invT[i][j] = F_inv[j][i];
 
-        const Tensor<2,dim>  F_inv   = invert(F);
-        const Tensor<2,dim>  F_invT  = transpose(F_inv);
-        const Tensor<2,dim>  b       = F * transpose(F);
-        const double         I1      = trace(b);
+        // Precompute J^2 and (J^2 - 1).
+        const double J2      = J * J;
+        const double J2_minus_1 = J2 - 1.0;
 
-        Tensor<4,dim> A;                 // initialised to zero
+        Tensor<4, dim> A; // Automatically initialized to zero.
 
-        // --- isochoric block -------------------------------------------------
-        for (unsigned int i=0;i<dim;++i)
-            for (unsigned int j=0;j<dim;++j)
-            for (unsigned int k=0;k<dim;++k)
-                for (unsigned int l=0;l<dim;++l)
+        // Loop over all indices: (i,I) for P and (j,J) for F.
+        for (unsigned int i = 0; i < dim; ++i)
+            for (unsigned int I = 0; I < dim; ++I)
+            for (unsigned int j = 0; j < dim; ++j)
+                for (unsigned int J_index = 0; J_index < dim; ++J_index)
                 {
-                const double delta_ik = (i==k);
-                const double delta_jl = (j==l);
-                const double delta_kl = (k==l);
-                const double delta_ij = (i==j);
+                // 1) Deviatoric / “2C1 delta” term:
+                //      2*C1 * delta_{i j} * delta_{I J_index} 
+                const double dev_term
+                    = ( (i == j) && (I == J_index) )
+                    ? 2.0 * c_1
+                    : 0.0;
 
-                const double term1 = delta_ik*delta_jl;
-                const double term2 = (I1/dim)*delta_ij*F_inv[l][k];
-                const double term3 = (1.0/dim)*delta_kl*F_inv[j][i];
-                const double term4 = (I1/dim)*F_inv[j][i]*F_inv[l][k];
-                const double term5 = (2.0/dim)*b[i][j]*F_inv[l][k];
+                // 2) Volumetric “K J^2 (F^{-T})_{iI} (F^{-T})_{jJ}” term:
+                const double vol_termA
+                    = kappa * J2 
+                    * F_invT[i][I] 
+                    * F_invT[j][J_index];
 
-                A[i][j][k][l] += 2.0*c_1*Jm23*( term1 - term2 + term3 - term4 - term5 );
-                }
+                // 3) Volumetric “- (K/2)(J^2 - 1) (F^{-T})_{iJ} (F^{-T})_{jI}” term:
+                const double vol_termB
+                    = -0.5 * kappa 
+                    * J2_minus_1 
+                    * F_invT[i][J_index] 
+                    * F_invT[j][I];
 
-        // --- volumetric block ------------------------------------------------
-        const double pref_J   = kappa * J;
-        const double pref_J2m1 = 0.5 * kappa * (J*J - 1.0);
-
-        for (unsigned int i=0;i<dim;++i)
-            for (unsigned int j=0;j<dim;++j)
-            for (unsigned int k=0;k<dim;++k)
-                for (unsigned int l=0;l<dim;++l)
-                {
-                const double termA = pref_J   * F_invT[j][i] * F_invT[l][k];
-                const double termB = pref_J2m1* F_invT[j][k] * F_invT[l][i];
-
-                A[i][j][k][l] += termA - termB;
+                A[i][I][j][J_index] = dev_term + vol_termA + vol_termB;
                 }
 
         return A;
@@ -609,18 +596,17 @@ private:
         NumberType J_tilde = determinant(F);
         Tensor<2, dim, NumberType> F_bar = Physics::Elasticity::Kinematics::F_iso(F);
         const Tensor<2, dim, NumberType> b_bar_tensor = F_bar * transpose(F_bar);
-        const SymmetricTensor<2, dim, NumberType> b_bar = symmetrize(b_bar_tensor);
-        NumberType tr_b = trace(b_bar);
+        NumberType tr_b = trace(b_bar_tensor);
 
         // Volumetric Response
         NumberType G = 0.25 * (J_tilde * J_tilde - 1 - 2 * std::log(J_tilde));
         NumberType SEF_vol = kappa * G;
 
         // Isochoric Response
-        NumberType SEF_iso = c_1 * (tr_b - 3);
+        NumberType SEF_iso = c_1 * (tr_b - dim);
 
         // Total Response
-        return SEF_iso;// + SEF_vol;
+        return SEF_iso + SEF_vol;
     }
 
     // AD function to compute SEF and derivatives
@@ -775,7 +761,6 @@ class RVE_SF
     private:
 
         // Functions
-        //void rhs(const std::vector<Point<dim>> &points, std::vector<Tensor<1, dim>> &values);
         void make_grid();
         void setup_system();
         void assemble_system();
@@ -783,6 +768,7 @@ class RVE_SF
         void solve_linear_system();
         void solve_nonlinear();
         void output_results();
+        void move_mesh();
         Tensor<2, dim> compute_avg_deformation();
         Tensor<2, dim> compute_avg_stress();
         
@@ -820,7 +806,8 @@ class RVE_SF
         // In your RVE_SF class (private section)
         std::vector<GridTools::PeriodicFacePair<typename Triangulation<dim>::cell_iterator>> matchedpairsx, matchedpairsy;
 
-        // Support Points
+        // Total deformation for mapping geometry
+        Vector<double> u_total;
        
 
 
@@ -837,7 +824,10 @@ RVE_SF<dim>::RVE_SF(const std::string &input_file)
     , quadrature(parameters.quad_order)
     , time(parameters.end_time, parameters.delta_t)
     , material(parameters.mu, parameters.nu)
-    {Assert(dim == 2 || dim ==3, ExcMessage("This problem only works in 2 or 3 dimensions"));}
+    {
+        Assert(dim == 2 || dim ==3, ExcMessage("This problem only works in 2 or 3 dimensions"));
+        u_total.reinit(dof_handler.n_dofs());
+    }
 
 
 
@@ -847,22 +837,22 @@ void RVE_SF<dim>::run()
     make_grid();
     setup_system();
     
-    
-
-    
     while(time.current() < time.end())
     {
         apply_boundary_conditions();
         solve_nonlinear();
-        output_results();
-        time.increment();
+
 
         avg_deformation = compute_avg_deformation();
         avg_stress = compute_avg_stress();
 
         std::cout << "Average Deformation: \n   " << avg_deformation << std::endl;
         std::cout << "Average Stress: \n   " << avg_stress << std::endl;
+        
+        move_mesh();
 
+        output_results();
+        time.increment();
     };
     
 
@@ -896,13 +886,6 @@ void RVE_SF<dim>::setup_system()
     dof_handler.distribute_dofs(fe);
     DoFRenumbering::Cuthill_McKee(dof_handler);
 
-    //apply_boundary_conditions();
-
-    // --- Output constraints to a text file for debugging ---
-    std::ofstream constraint_file("constraints.txt");
-    constraints.print(constraint_file);
-    constraint_file.close();
-
     std::cout << " - Generating Sparsity Pattern" << std::endl;
     DynamicSparsityPattern dsp(dof_handler.n_dofs());
     DoFTools::make_sparsity_pattern(dof_handler, dsp, constraints, /*keep_constrained_dofs=*/true);
@@ -911,10 +894,10 @@ void RVE_SF<dim>::setup_system()
     std::cout << " - Resizing Tangent Matrix and RHS and Solution Vectors" << std::endl;
     tangent_matrix.reinit(sparsity_pattern);
     solution.reinit(dof_handler.n_dofs());
+    u_total.reinit(dof_handler.n_dofs());
     system_rhs.reinit(dof_handler.n_dofs());
     solution = 0;
 
-    // (Optional) Output DoF support point info for debugging
     if(parameters.file_output_mode)
     {
         const std::map<dealii::types::global_dof_index, dealii::Point<dim>>
@@ -926,7 +909,6 @@ void RVE_SF<dim>::setup_system()
     }
 }
 
-/* put this right above apply_boundary_conditions() or in a header */
 template <int dim>
 struct PointLess
 {
@@ -948,260 +930,137 @@ void RVE_SF<dim>::apply_boundary_conditions()
 {
     
     std::cout << "Applying periodic boundary conditions with built-in applied strain..." << std::endl;
-
-for (const auto &cell : triangulation.active_cell_iterators())
-  for (unsigned int f=0; f<GeometryInfo<2>::faces_per_cell; ++f)
-    if (cell->face(f)->at_boundary())
-      //std::cout << "Face at boundary: " << cell->face(f)->boundary_id() << std::endl;
-
-
-
-
-//std::cout << "matchedpairsx.size() = " << matchedpairsx.size() << std::endl;
-//std::cout << "matchedpairsy.size() = " << matchedpairsy.size() << std::endl;
-
-
-
     constraints.clear();
 
     std::vector<Point<dim>> support_points(dof_handler.n_dofs());
     DoFTools::map_dofs_to_support_points(MappingQ1<dim>(), dof_handler, support_points);
 
-    Fbar[0][0] += 0.01 ;//* (time.current() / time.end());
+    Fbar[0][0] += 0.01 ;
 
     std::vector<unsigned int> left_dofs, right_dofs, bottom_dofs, top_dofs;
-const double tol = 1e-12; // Tolerance for floating point comparison
+    const double tol = 1e-12; // Tolerance for floating point comparison
 
-for (unsigned int i = 0; i < support_points.size(); ++i)
-{
-    const auto &p = support_points[i];
-    if (std::abs(p[0] - 0.0) < tol)
-        left_dofs.push_back(i);
-    if (std::abs(p[0] - parameters.scale) < tol)
-        right_dofs.push_back(i);
-    if (std::abs(p[1] - 0.0) < tol)
-        bottom_dofs.push_back(i);
-    if (std::abs(p[1] - parameters.scale) < tol)
-        top_dofs.push_back(i);
-}
-
-std::cout << " Lambda time" << std::endl;
-
-    
-
-std::map<Point<dim>,
-         std::array<types::global_dof_index, dim>,
-         PointLess<dim>> point_to_dof;
-
-
-for (types::global_dof_index gdof = 0; gdof < dof_handler.n_dofs(); ++gdof)
-{
-    /* local shape‑function index 0 … fe.n_dofs_per_cell()-1 */
-    const unsigned int local_index = gdof % fe.n_dofs_per_cell();
-
-    /* component (0 = x, 1 = y) of that local shape function */
-    const unsigned int comp = fe.system_to_component_index(local_index).first;
-
-    point_to_dof[support_points[gdof]][comp] = gdof;
-}
-
-
-    /* --- lambda that imposes affine periodicity ------------------- */
-    auto match_periodic = [&](const std::vector<unsigned int> &side1,
-                              const std::vector<unsigned int> &side2,
-                              const unsigned int periodic_coord) // 0=x,1=y
+    for (unsigned int i = 0; i < support_points.size(); ++i)
     {
-        for (unsigned int i1 : side1)
+        const auto &p = support_points[i];
+        if (std::abs(p[0] - 0.0) < tol)
+            left_dofs.push_back(i);
+        if (std::abs(p[0] - parameters.scale) < tol)
+            right_dofs.push_back(i);
+        if (std::abs(p[1] - 0.0) < tol)
+            bottom_dofs.push_back(i);
+        if (std::abs(p[1] - parameters.scale) < tol)
+            top_dofs.push_back(i);
+    }
+
+    std::cout << " Lambda time" << std::endl;
+
+        
+
+    std::map<Point<dim>,
+            std::array<types::global_dof_index, dim>,
+            PointLess<dim>> point_to_dof;
+
+
+    for (types::global_dof_index gdof = 0; gdof < dof_handler.n_dofs(); ++gdof)
+    {
+        /* local shape‑function index 0 … fe.n_dofs_per_cell()-1 */
+        const unsigned int local_index = gdof % fe.n_dofs_per_cell();
+
+        /* component (0 = x, 1 = y) of that local shape function */
+        const unsigned int comp = fe.system_to_component_index(local_index).first;
+
+        point_to_dof[support_points[gdof]][comp] = gdof;
+    }
+
+
+        /* --- lambda that imposes affine periodicity ------------------- */
+        auto match_periodic = [&](const std::vector<unsigned int> &side1,
+                                const std::vector<unsigned int> &side2,
+                                const unsigned int periodic_coord) // 0=x,1=y
         {
-            const Point<dim> &p1 = support_points[i1];
-
-            for (unsigned int i2 : side2)
+            for (unsigned int i1 : side1)
             {
-                const Point<dim> &p2 = support_points[i2];
+                const Point<dim> &p1 = support_points[i1];
 
-                bool partner = true;
-                for (unsigned int d = 0; d < dim; ++d)
+                for (unsigned int i2 : side2)
                 {
-                    if (d == periodic_coord) continue;
-                    if (std::abs(p1[d] - p2[d]) > tol)
+                    const Point<dim> &p2 = support_points[i2];
+
+                    bool partner = true;
+                    for (unsigned int d = 0; d < dim; ++d)
                     {
-                        partner = false;
-                        break;
+                        if (d == periodic_coord) continue;
+                        if (std::abs(p1[d] - p2[d]) > tol)
+                        {
+                            partner = false;
+                            break;
+                        }
                     }
+                    if (!partner) continue;
+
+                    for (unsigned int comp = 0; comp < dim; ++comp)
+                    {
+                        const auto dof1 = point_to_dof[p1][comp];   // master
+                        const auto dof2 = point_to_dof[p2][comp];   // slave
+
+                        constraints.add_line(dof1);
+                        constraints.add_entry(dof1, dof2, 1.0);
+
+                        const double rhs =
+                            ((Fbar - unit_symmetric_tensor<dim>()) * 
+                            (p1 - p2))[comp];
+                        constraints.set_inhomogeneity(dof1, rhs);
+
+                        /*
+                        if (parameters.terminal_output_mode)
+                            std::cout << "Periodic pair: point_m = "
+                                    << p1 << ", point_s = " << p2
+                                    << ", comp = " << comp
+                                    << ", rhs = " << rhs << std::endl;
+                                    */
+                    }
+
+                    break;      // partner found → exit inner loop
                 }
-                if (!partner) continue;
-
-                for (unsigned int comp = 0; comp < dim; ++comp)
-                {
-                    const auto dof1 = point_to_dof[p1][comp];   // master
-                    const auto dof2 = point_to_dof[p2][comp];   // slave
-
-                    constraints.add_line(dof1);
-                    constraints.add_entry(dof1, dof2, 1.0);
-
-                    const double rhs =
-                        ((Fbar - unit_symmetric_tensor<dim>()) * 
-                         (p1 - p2))[comp];
-                    constraints.set_inhomogeneity(dof1, rhs);
-
-                    /*
-                    if (parameters.terminal_output_mode)
-                        std::cout << "Periodic pair: point_m = "
-                                  << p1 << ", point_s = " << p2
-                                  << ", comp = " << comp
-                                  << ", rhs = " << rhs << std::endl;
-                                  */
-                }
-
-                break;      // partner found → exit inner loop
             }
-        }
-    };
+        };
 
 
 
-match_periodic(left_dofs, right_dofs, 0);   // x-direction periodicity (coord=0)
-match_periodic(bottom_dofs, top_dofs, 1);   // y-direction periodicity (coord=1)
+    match_periodic(left_dofs, right_dofs, 0);   // x-direction periodicity (coord=0)
+    match_periodic(bottom_dofs, top_dofs, 1);   // y-direction periodicity (coord=1)
 
     
     constraints.add_line(0);   // fix u_x at (0,0)
     constraints.set_inhomogeneity(0, 0.0);
-    constraints.add_line(1);   // fix u_x at (0,0)
+    constraints.add_line(1);   // fix u_y at (0,0)
     constraints.set_inhomogeneity(1, 0.0);
-    constraints.add_line(470);   // fix u_x at (0,0)
+    constraints.add_line(470);   // fix u_x at (0,1)
     constraints.set_inhomogeneity(470, 0.0);
 
     constraints.close();
 
-/* --- keep the two lines you already have --- */
-DynamicSparsityPattern dsp(dof_handler.n_dofs());
-DoFTools::make_sparsity_pattern(dof_handler, dsp, constraints,
-/*keep_constrained_dofs=*/true);
-sparsity_pattern.copy_from(dsp);
+    DynamicSparsityPattern dsp(dof_handler.n_dofs());
+    DoFTools::make_sparsity_pattern(dof_handler, dsp, constraints,
+    /*keep_constrained_dofs=*/true);
+    sparsity_pattern.copy_from(dsp);
 
-/* --- ADD these four lines ------------------ */
-tangent_matrix.reinit(sparsity_pattern);
-system_rhs.reinit(dof_handler.n_dofs());
-tangent_matrix = 0.0;
-system_rhs    = 0.0;
+    tangent_matrix.reinit(sparsity_pattern);
+    system_rhs.reinit(dof_handler.n_dofs());
+    tangent_matrix = 0.0;
+    system_rhs    = 0.0;
 
 
     constraints.distribute(solution);
-
-    /*
-    VectorTools::interpolate(dof_handler,
-                         MacroDisplacement(Fbar - unit_symmetric_tensor<dim>()),
-                         solution);
-    */
-    
-    
-
-    
-    /*
-constraints.clear();
-
-    // 1. Set the prescribed macro strain here
-    Tensor<2,dim> applied_strain;
-    applied_strain[0][0] = 0.02; // Example: 2% uniaxial strain in x
-    applied_strain[1][1] = 0.00; // No strain in y
-    applied_strain[0][1] = 0.00;
-    applied_strain[1][0] = 0.00;
-
-    // 2. Map DoFs to support points
-    std::vector<Point<dim>> support_points(dof_handler.n_dofs());
-    DoFTools::map_dofs_to_support_points(MappingQ1<dim>(), dof_handler, support_points);
-
-    // 3. Anchor points (to remove rigid body motion)
-    const Point<dim> anchor_point_1(0, 0);
-    const Point<dim> anchor_point_2(parameters.scale, parameters.scale);
-
-    // 4. Impose periodic constraints using matched face pairs (x and y)
-    auto impose_periodic_from_pairs = [&](const std::vector<GridTools::PeriodicFacePair<typename DoFHandler<dim>::cell_iterator>> &pairs)
-    {
-        for (const auto &pair : pairs)
-        {
-            if (!pair.cell[0]->is_active() || !pair.cell[1]->is_active())
-                continue;
-
-            const auto &master = pair.cell[0];
-            const auto &slave  = pair.cell[1];
-            const unsigned int master_face = pair.face_idx[0];
-            const unsigned int slave_face  = pair.face_idx[1];
-
-            std::vector<types::global_dof_index> master_dof_indices(fe.n_dofs_per_cell());
-            std::vector<types::global_dof_index> slave_dof_indices(fe.n_dofs_per_cell());
-            master->get_dof_indices(master_dof_indices);
-            slave->get_dof_indices(slave_dof_indices);
-
-            for (unsigned int i = 0 ; i < fe.n_dofs_per_face(); ++i)
-            {
-                unsigned int master_dof = master_dof_indices[fe.face_to_cell_index(i, master_face)];
-                unsigned int slave_dof  = slave_dof_indices[fe.face_to_cell_index(i, slave_face)];
-                unsigned int comp = fe.system_to_component_index(fe.face_to_cell_index(i, master_face)).first;
-
-                // Skip anchors
-                const Point<dim> &point_m = support_points[master_dof];
-                const Point<dim> &point_s = support_points[slave_dof];
-                if ((point_m - anchor_point_1).norm() < 1e-12 ||
-                    (point_m - anchor_point_2).norm() < 1e-12 ||
-                    (point_s - anchor_point_1).norm() < 1e-12 ||
-                    (point_s - anchor_point_2).norm() < 1e-12)
-                    continue;
-
-                // Affine jump: (applied_strain * (x_master - x_slave))[comp]
-                double rhs = (applied_strain * (point_m - point_s))[comp];
-
-                constraints.add_line(master_dof);
-                constraints.add_entry(master_dof, slave_dof, 1.0);
-                constraints.set_inhomogeneity(master_dof, rhs);
-
-                if (parameters.terminal_output_mode)
-                    std::cout << "Periodic pair: master_dof = " << master_dof
-                              << ", slave_dof = " << slave_dof
-                              << ", comp = " << comp
-                              << ", diff = " << (point_m - point_s)
-                              << ", rhs = " << rhs << std::endl;
-            }
-        }
-    };
-
-    impose_periodic_from_pairs(matchedpairsx);
-    impose_periodic_from_pairs(matchedpairsy);
-
-    // 5. Anchor the solution at (0,0) and (scale,scale)
-    for (unsigned int i = 0; i < support_points.size(); ++i)
-    {
-        if ((support_points[i] - anchor_point_1).norm() < 1e-12 ||
-            (support_points[i] - anchor_point_2).norm() < 1e-12)
-        {
-            for (unsigned int d = 0; d < dim; ++d)
-            {
-                unsigned int dof = i * dim + d;
-                if (!constraints.is_constrained(dof))
-                {
-                    constraints.add_line(dof);
-                    constraints.set_inhomogeneity(dof, 0.0);
-                }
-            }
-        }
-    }
-
-    constraints.close();
-    std::cout << "Periodic affine constraints (prescribed strain) and anchors applied.\n";
-    */
 }
 
 
 template <int dim>
 void RVE_SF<dim>::assemble_system()
 {
-    
 
-    //std::cout << "Assembling System" << std::endl;
-    
-
-    
-        // --- Output constraints to a text file for debugging ---
+    // Output constraints to a text file for debugging
     std::ofstream constraint_file("constraints.txt");
     constraints.print(constraint_file);
     constraint_file.close();
@@ -1213,14 +1072,15 @@ void RVE_SF<dim>::assemble_system()
                 dealii::MappingQ1<dim>(), dof_handler);
         std::ofstream dof_location_file("dof_numbering.gnuplot");
         dealii::DoFTools::write_gnuplot_dof_support_point_info(dof_location_file, dof_location_map);
-        //std::cout << "Wrote DoF support point info to dof_numbering.gnuplot" << std::endl;
     }
 
     
     tangent_matrix = 0.0;
     system_rhs = 0.0;
 
-    FEValues<dim> fe_values(fe, quadrature, update_values | update_gradients | update_quadrature_points | update_JxW_values);
+    MappingQEulerian<dim,Vector<double>> mapping(parameters.poly_degree, dof_handler, u_total);
+
+    FEValues<dim> fe_values(mapping, fe, quadrature, update_values | update_gradients | update_quadrature_points | update_JxW_values);
     const unsigned int dofs_per_cell = fe.n_dofs_per_cell();
     const unsigned int n_q_points = quadrature.size();
     const FEValuesExtractors::Vector displacements(0);
@@ -1247,14 +1107,11 @@ void RVE_SF<dim>::assemble_system()
             if (determinant(F) <= Jcrit)
             throw ExcMessage("detF too small");
 
-
-            //std::cout << F << std::endl;
-
             material.update_material(F);
 
             // Material Stress and tangent
             const Tensor<2, dim> P = material.compute_P(); //material.analytical_P(); 
-            const Tensor<4, dim> mat_tangent = material.compute_tangent();//material.analytical_mat(); 
+            const Tensor<4, dim> mat_tangent = material.compute_tangent(); //material.analytical_mat(); 
 
 
            for (unsigned int i = 0; i < dofs_per_cell; ++i)
@@ -1276,7 +1133,6 @@ void RVE_SF<dim>::assemble_system()
                 cell_matrix(i,j) += K_ij * fe_values.JxW(q);
             }
 
-            /* residual -------------------------------------------------- */
             double R_i = 0.0;
             for (unsigned int A = 0; A < dim; ++A)
                 R_i += P[A][comp_i] * grad_phi_i[A];
@@ -1289,91 +1145,6 @@ void RVE_SF<dim>::assemble_system()
         constraints.distribute_local_to_global(cell_matrix, cell_rhs, local_dof_indices, tangent_matrix, system_rhs);
     }
 
-
-    
-    
-
-    /*
-
-            // --- Output constraints to a text file for debugging ---
-    std::ofstream constraint_file("constraints.txt");
-    constraints.print(constraint_file);
-    constraint_file.close();
-
-    std::cout << "Assembling linear elasticity system..." << std::endl;
-
-    tangent_matrix = 0.0;
-    system_rhs = 0.0;
-
-    FEValues<dim> fe_values(fe, quadrature,
-                            update_values | update_gradients |
-                            update_quadrature_points | update_JxW_values);
-
-    const unsigned int dofs_per_cell = fe.n_dofs_per_cell();
-    const unsigned int n_q_points    = quadrature.size();
-
-    const FEValuesExtractors::Vector displacements(0);
-
-    std::vector<types::global_dof_index> local_dof_indices(dofs_per_cell);
-    FullMatrix<double> cell_matrix(dofs_per_cell, dofs_per_cell);
-    Vector<double>     cell_rhs(dofs_per_cell);
-
-    // Lame parameters from your parameters struct
-    const double mu = parameters.mu;
-    const double nu = parameters.nu;
-    const double lambda = (2.0 * mu * nu) / (1.0 - 2.0 * nu);
-
-    for (const auto &cell : dof_handler.active_cell_iterators())
-    {
-        cell_matrix = 0.0;
-        cell_rhs = 0.0;
-        fe_values.reinit(cell);
-
-        for (unsigned int q = 0; q < n_q_points; ++q)
-        {
-            // Example: constant body force in x, scaled by time (optional)
-            Tensor<1, dim> body_force;
-            body_force[0] = 10000000.0 * time.current(); // x-direction
-            // body_force[1] = ...; // y-direction if desired
-
-            for (unsigned int i = 0; i < dofs_per_cell; ++i)
-            {
-                const Tensor<2, dim> phi_i_grad = fe_values[displacements].gradient(i, q);
-                const unsigned int component_i = fe.system_to_component_index(i).first;
-
-                for (unsigned int j = 0; j < dofs_per_cell; ++j)
-                {
-                    const Tensor<2, dim> phi_j_grad = fe_values[displacements].gradient(j, q);
-
-                    // Symmetric strain tensor: ε(u) = 0.5*(grad u + grad u^T)
-                    const SymmetricTensor<2, dim> sym_phi_i = symmetrize(phi_i_grad);
-                    const SymmetricTensor<2, dim> sym_phi_j = symmetrize(phi_j_grad);
-
-                    // Linear elasticity bilinear form
-                    cell_matrix(i, j) += (
-                        2.0 * mu * sym_phi_i * sym_phi_j +
-                        lambda * trace(sym_phi_i) * trace(sym_phi_j)
-                    ) * fe_values.JxW(q);
-                }
-
-                // Assemble RHS for vector-valued body force
-                cell_rhs(i) +=  fe_values.shape_value(i, q) *
-                               1 *
-                               fe_values.JxW(q);
-            }
-        }
-
-        cell->get_dof_indices(local_dof_indices);
-        constraints.distribute_local_to_global(cell_matrix, cell_rhs,
-                                               local_dof_indices,
-                                               tangent_matrix, system_rhs);
-    }
-
-    */
-
-
-
-
     if(parameters.file_output_mode)
     {
     dealii::MatrixOut matrix_out;
@@ -1384,7 +1155,6 @@ void RVE_SF<dim>::assemble_system()
     std::ofstream matrix_file(fname.str());
 
     matrix_out.write_vtk(matrix_file);
-    //std::cout << "Wrote tangent_matrix.vtk for inspection." << std::endl;
     
 
     std::ostringstream fname_2;
@@ -1420,11 +1190,8 @@ void RVE_SF<dim>::assemble_system()
         std::cout << "ERROR: Non-finite entries detected in system matrix or RHS!" << std::endl;
     }
 }
-#include <deal.II/lac/solver_cg.h>
-#include <deal.II/lac/solver_minres.h>
-#include <deal.II/lac/solver_gmres.h>
-#include <deal.II/lac/sparse_direct.h>
-#include <deal.II/lac/precondition.h>
+    #include <deal.II/lac/sparse_direct.h>
+    #include <deal.II/lac/precondition.h>
 
 template <int dim>
 void RVE_SF<dim>::solve_linear_system()
@@ -1513,6 +1280,8 @@ void RVE_SF<dim>::solve_nonlinear()
     {
         std::cout << " - Newton iteration " << iteration << std::endl;
 
+        
+
         /* residual & tangent at current guess ------------------------ */
         assemble_system();
         const double R0 = system_rhs.l2_norm();
@@ -1586,6 +1355,9 @@ void RVE_SF<dim>::solve_nonlinear()
             return;
         }
 
+
+
+
         ++iteration;
     }
 
@@ -1593,7 +1365,25 @@ void RVE_SF<dim>::solve_nonlinear()
               << parameters.max_iterations_NR << " iterations!\n";
 }
 
+template<int dim>
+void RVE_SF<dim>::move_mesh()
+{
+    std::cout << "Moving Mesh to reflect deformation" << std::endl;
 
+    std::vector<bool> vertex_touched(triangulation.n_vertices(), false);
+    for (auto &cell : dof_handler.active_cell_iterators())
+        for( const auto v : cell->vertex_indices())
+            if (vertex_touched[cell->vertex_index(v)] == false)
+            {
+                vertex_touched[cell->vertex_index(v)] = true;
+
+                Point<dim> vertex_displacement;
+                for (unsigned int d = 0; d < dim; ++d)
+                    vertex_displacement[d] = solution(cell->vertex_dof_index(v,d));
+                
+                cell->vertex(v) += vertex_displacement;
+            }
+}
 
 template <int dim>
 void RVE_SF<dim>::output_results()
@@ -1614,7 +1404,9 @@ void RVE_SF<dim>::output_results()
   Vector<double> P_xx(n_cells), P_xy(n_cells), P_yx(n_cells), P_yy(n_cells);
 
   const FEValuesExtractors::Vector disp(0);
-  FEValues<dim> fe_values(fe, quadrature, update_gradients);
+  MappingQEulerian<dim,Vector<double>> mapping(parameters.poly_degree, dof_handler, u_total);
+
+  FEValues<dim> fe_values(mapping, fe, quadrature, update_gradients);
 
   unsigned int c = 0;
   for (const auto &cell : dof_handler.active_cell_iterators())
@@ -1663,7 +1455,9 @@ Tensor<2, dim> RVE_SF<dim>::compute_avg_deformation()
     unsigned int n_q_size = quadrature.size();
 
     const FEValuesExtractors::Vector displacement(0);
-    FEValues<dim> fe_values(fe, quadrature, update_gradients | update_JxW_values | update_quadrature_points);
+    MappingQEulerian<dim,Vector<double>> mapping(parameters.poly_degree, dof_handler, u_total);
+
+    FEValues<dim> fe_values(mapping,fe, quadrature, update_gradients | update_JxW_values | update_quadrature_points);
 
     for (const auto &cell : dof_handler.active_cell_iterators())
         {
@@ -1694,7 +1488,9 @@ Tensor<2, dim> RVE_SF<dim>::compute_avg_stress()
     Tensor<2, dim> PM;
 
     const FEValuesExtractors::Vector displacement(0);
-    FEValues<dim> fe_values(fe, quadrature, update_gradients | update_JxW_values | update_quadrature_points);
+    MappingQEulerian<dim,Vector<double>> mapping(parameters.poly_degree, dof_handler, u_total);
+
+    FEValues<dim> fe_values(mapping, fe, quadrature, update_gradients | update_JxW_values | update_quadrature_points);
 
     for (const auto &cell : dof_handler.active_cell_iterators())
         {

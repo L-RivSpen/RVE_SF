@@ -12,25 +12,24 @@ subsection Geometry
 end
 
 subsection Material properties
-  set Poisson's ratio = 0.40
-  set Shear modulus = 80.194e6
+  set Poisson's ratio = 0.3
+  set Shear modulus = 0.5e6
 end
 
 subsection Linear solver
   set Solver type = CG
   set Max iteration multiplier = 100
   set Preconditioner type = ssor
-  set Preconditioner relaxation = 0.5
+  set Preconditioner relaxation = 1.0
 end
 
 subsection Nonlinear solver
-  set Max iterations Newton-Raphson = 250
-  set Tolerance force = 1.0e-9
-  set Tolerance displacement = 1.0e-6
+  set Max iterations Newton-Raphson = 100
+  set Tolerance force = 1.0e-10
+  set Tolerance displacement = 1.0e-8
 end
 
 subsection Time
   set End time = 1
   set Time step size = 0.1
 end
-
