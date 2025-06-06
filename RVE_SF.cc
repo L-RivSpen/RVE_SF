@@ -48,6 +48,8 @@
 #include <deal.II/lac/solver_selector.h>                  // Solver selector
 #include <deal.II/lac/sparse_direct.h>                    //
 #include <deal.II/lac/vector_memory.h>                    // needed for growing vector memory (For solvers)
+#include <deal.II/lac/la_parallel_block_vector.h>
+
                                                           //
                                                           //
 // Vector and number tools                                // 
@@ -351,7 +353,7 @@ void Code::declare_parameters(ParameterHandler &prm)
                           "Enables or disables debugging outputs in terminal");
 
         prm.declare_entry("File Output",
-                          "true",
+                          "false",
                           Patterns::Bool(),
                           "Enables or disables files for debugging outputs");
     }
@@ -792,19 +794,20 @@ class RVE_SF
         Material<dim> material;
 
         // Boundary Values
-        // Periodocity Members
         // List for storing pair BC's
-        std::vector<unsigned int> x_m_dofs;
-        std::vector<unsigned int> x_s_dofs;
-        std::vector<unsigned int> y_m_dofs;
-        std::vector<unsigned int> y_s_dofs;
+        std::vector<unsigned int> left_dofs, right_dofs, bottom_dofs, 
+                                  top_dofs, back_dofs, front_dofs;
+
+
+        // Fixed Dofs
+        unsigned int fixed_dof1_x, fixed_dof1_y, fixed_dof2_x,
+                     fixed_dof1_z, fixed_dof2_y, fixed_dof3_x;
+
+        std::vector<unsigned int> fixed_dofs;
 
         // Resulting Strain
         std::map<types::global_dof_index, double> boundary_values;
         Tensor<2, dim> Fbar = unit_symmetric_tensor<dim>();
-
-        // In your RVE_SF class (private section)
-        std::vector<GridTools::PeriodicFacePair<typename Triangulation<dim>::cell_iterator>> matchedpairsx, matchedpairsy;
 
         // Total deformation for mapping geometry
         Vector<double> u_total;
@@ -867,12 +870,6 @@ void RVE_SF<dim>::make_grid()
     GridTools::scale(parameters.scale, triangulation);
     triangulation.refine_global(parameters.global_refinement);
 
-    matchedpairsx.clear();
-    matchedpairsy.clear();
-    GridTools::collect_periodic_faces(triangulation, 0, 1, 0, matchedpairsx);
-    GridTools::collect_periodic_faces(triangulation, 2, 3, 1, matchedpairsy);
-
-
     std::cout << "Mesh Generated" << std::endl;
     
     
@@ -897,6 +894,116 @@ void RVE_SF<dim>::setup_system()
     u_total.reinit(dof_handler.n_dofs());
     system_rhs.reinit(dof_handler.n_dofs());
     solution = 0;
+
+    std::cout << " - Finding Perioidic Faces" << std::endl;
+
+    
+    std::vector<Point<dim>> support_points(dof_handler.n_dofs());
+    DoFTools::map_dofs_to_support_points(MappingQ1<dim>(), dof_handler, support_points);
+
+
+    const double tol = 1e-12; // Tolerance for floating point comparison
+    for (unsigned int i = 0; i < support_points.size(); ++i)
+    {
+        const auto &p = support_points[i];
+        if (std::abs(p[0] - 0.0) < tol)
+            left_dofs.push_back(i);
+        if (std::abs(p[0] - parameters.scale) < tol)
+            right_dofs.push_back(i);
+        if (std::abs(p[1] - 0.0) < tol)
+            bottom_dofs.push_back(i);
+        if (std::abs(p[1] - parameters.scale) < tol)
+            top_dofs.push_back(i);
+        if (dim == 3)
+            {
+                if (std::abs(p[2] - 0.0) < tol)
+                    back_dofs.push_back(i);
+                if (std::abs(p[2] - parameters.scale) < tol)
+                    front_dofs.push_back(i);
+            }
+    }
+
+    std::cout << " - Finding DOFs to fix" << std::endl;
+
+    std::map<types::global_dof_index, Point<dim>> dof_location_map = 
+    DoFTools::map_dofs_to_support_points(MappingQ1<dim>(), dof_handler);
+
+    // Points to constraint
+    Point<dim> Point1;
+    Point1[0] = 0.0; Point1[1] = 0.0;
+
+    Point<dim> Point2;
+    Point2[0] = 0.0; Point2[1] = parameters.scale;
+
+    Point<dim> Point3;
+    if (dim == 3)
+    {
+    Point3[0] = 0.0; Point3[1] = parameters.scale; Point3[2] = parameters.scale;
+    }
+
+    const double tolerance = 1e-10;
+
+    for (const auto &entry : dof_location_map)
+    {
+
+        const types::global_dof_index dof_index = entry.first;
+        const Point<dim> &dof_location = entry.second;
+
+        if (dof_location.distance(Point1) < tolerance)
+        {
+            std::cout << "Found Point 1" << std::endl;
+            if (dof_index % dim == 0)
+            {
+                fixed_dof1_x = dof_index;
+                fixed_dofs.push_back(fixed_dof1_x);
+                std::cout << "Fixed X. DOF: " << fixed_dof1_x << std::endl;
+
+            }
+            if (dof_index % dim == 1)
+            {
+                fixed_dof1_y = dof_index;
+                fixed_dofs.push_back(fixed_dof1_y);
+                std::cout << "Fixed Y. DOF: " << fixed_dof1_y << std::endl;
+
+            }
+            if ((dim == 3) && (dof_index % dim == 2))
+            {
+                fixed_dof1_z = dof_index;
+                fixed_dofs.push_back(fixed_dof1_z);
+                std::cout << "Fixed Z. DOF: " << fixed_dof1_z << std::endl;
+            }
+        }
+
+        if (dof_location.distance(Point2) < tolerance)
+        {
+            std::cout << "Found Point 2" << std::endl;
+            if (dof_index % dim == 0)
+            {
+                fixed_dof2_x = dof_index;
+                fixed_dofs.push_back(fixed_dof2_x);
+                std::cout << "Fixed X. DOF: " << fixed_dof2_x << std::endl;
+
+            }
+            if ((dim == 3) && (dof_index % dim == 1))
+            {
+                fixed_dof2_y = dof_index;
+                fixed_dofs.push_back(fixed_dof2_y);
+                std::cout << "Fixed Y. DOF: " << fixed_dof2_y << std::endl;
+            }
+        }
+
+        if ((dof_location.distance(Point3) < tolerance) && (dim == 3))
+        {
+            std::cout << "Found Point 3" << std::endl;
+            if (dof_index % dim == 0)
+            {
+                fixed_dof3_x = dof_index;
+                fixed_dofs.push_back(fixed_dof3_x);
+                std::cout << "Fixed X. DOF: " << fixed_dof3_x << std::endl;
+            }
+        }
+            
+    }
 
     if(parameters.file_output_mode)
     {
@@ -935,25 +1042,19 @@ void RVE_SF<dim>::apply_boundary_conditions()
     std::vector<Point<dim>> support_points(dof_handler.n_dofs());
     DoFTools::map_dofs_to_support_points(MappingQ1<dim>(), dof_handler, support_points);
 
-    Fbar[0][0] += 0.01 ;
-
-    std::vector<unsigned int> left_dofs, right_dofs, bottom_dofs, top_dofs;
-    const double tol = 1e-12; // Tolerance for floating point comparison
-
-    for (unsigned int i = 0; i < support_points.size(); ++i)
+    if (time.current() == 0)
     {
-        const auto &p = support_points[i];
-        if (std::abs(p[0] - 0.0) < tol)
-            left_dofs.push_back(i);
-        if (std::abs(p[0] - parameters.scale) < tol)
-            right_dofs.push_back(i);
-        if (std::abs(p[1] - 0.0) < tol)
-            bottom_dofs.push_back(i);
-        if (std::abs(p[1] - parameters.scale) < tol)
-            top_dofs.push_back(i);
+        Fbar[0][0] += 0.0;
     }
+    else
+    {
+        Fbar[0][0] += 0.0025;
+        Fbar[1][1] -= 0.00125;
+        Fbar[2][2] -= 0.00125;
+    }
+    
 
-    std::cout << " Lambda time" << std::endl;
+    const double tol = 1e-12; // Tolerance for floating point comparison
 
         
 
@@ -1030,14 +1131,14 @@ void RVE_SF<dim>::apply_boundary_conditions()
 
     match_periodic(left_dofs, right_dofs, 0);   // x-direction periodicity (coord=0)
     match_periodic(bottom_dofs, top_dofs, 1);   // y-direction periodicity (coord=1)
+    if (dim == 3) match_periodic(back_dofs, front_dofs, 2);   // z-direction periodicity (coord=2)
 
-    
-    constraints.add_line(0);   // fix u_x at (0,0)
-    constraints.set_inhomogeneity(0, 0.0);
-    constraints.add_line(1);   // fix u_y at (0,0)
-    constraints.set_inhomogeneity(1, 0.0);
-    constraints.add_line(470);   // fix u_x at (0,1)
-    constraints.set_inhomogeneity(470, 0.0);
+
+    for (unsigned int &dof : fixed_dofs)
+    {
+        constraints.add_line(dof);   // fix u_x at (0,0)
+        constraints.set_inhomogeneity(dof, 0.0);
+    }
 
     constraints.close();
 
@@ -1103,7 +1204,7 @@ void RVE_SF<dim>::assemble_system()
             Tensor<2, dim> u_grad = local_solution_gradients[q];
             Tensor<2, dim> F = Physics::Elasticity::Kinematics::F(u_grad);
 
-            const double Jcrit = 0.2;                     // keep it positive
+            const double Jcrit = 0.0;                     // keep it positive
             if (determinant(F) <= Jcrit)
             throw ExcMessage("detF too small");
 
@@ -1525,7 +1626,7 @@ int main()
 {
 
     using namespace RVE;
-    RVE_SF<2> rve("parameters.prm");
+    RVE_SF<3> rve("parameters.prm");
     rve.run();
     return 0;
 }
