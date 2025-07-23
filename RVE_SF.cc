@@ -508,8 +508,27 @@ public:
         Assert(kappa > 0, ExcInternalError());
     }
 
-    void update_material(Tensor<2, dim> &new_F)
+    void update_material(Tensor<2, dim> &new_F, unsigned int mat_id)
     {
+
+        double mu, nu;
+
+        if (mat_id == 0)
+        {
+            mu = 0.5e6;
+            nu = 0.45;
+        }
+        else if (mat_id == 1)
+        {
+            mu = 1e6;
+            nu = 0.3;
+        }
+        else
+            std::cout << "Material Not Defined" << std::endl;
+
+        kappa = (2.0 * mu * (1.0 + nu)) / (3.0 * (1.0 - 2.0 * nu));
+        c_1 = mu / 2.0;
+
         F = new_F;
         compute_derivatives_ad();
     }
@@ -675,8 +694,8 @@ private:
     Tensor<2, dim> F;
 
     // Constitutive model parameters
-    const double kappa;
-    const double c_1;
+    double kappa;
+    double c_1;
 
     // First Piola Kirchhoff Stress
     Tensor<2, dim> P;
@@ -770,7 +789,7 @@ class RVE_SF
         void solve_linear_system();
         void solve_nonlinear();
         void output_results();
-        void move_mesh();
+        void update_total_displacement();
         Tensor<2, dim> compute_avg_deformation();
         Tensor<2, dim> compute_avg_stress();
         
@@ -792,6 +811,7 @@ class RVE_SF
 
         // Material 
         Material<dim> material;
+        Material<dim> material_2; 
 
         // Boundary Values
         // List for storing pair BC's
@@ -826,10 +846,10 @@ RVE_SF<dim>::RVE_SF(const std::string &input_file)
     , fe(FE_Q<dim>(parameters.poly_degree), dim)
     , quadrature(parameters.quad_order)
     , time(parameters.end_time, parameters.delta_t)
-    , material(parameters.mu, parameters.nu)
+    , material(0.5e6, 0.45)
+    , material_2(1e6, 0.3)
     {
         Assert(dim == 2 || dim ==3, ExcMessage("This problem only works in 2 or 3 dimensions"));
-        u_total.reinit(dof_handler.n_dofs());
     }
 
 
@@ -845,14 +865,16 @@ void RVE_SF<dim>::run()
         apply_boundary_conditions();
         solve_nonlinear();
 
+        update_total_displacement();
+
 
         avg_deformation = compute_avg_deformation();
         avg_stress = compute_avg_stress();
 
-        std::cout << "Average Deformation: \n   " << avg_deformation << std::endl;
-        std::cout << "Average Stress: \n   " << avg_stress << std::endl;
-        
-        move_mesh();
+        std::cout << "Time: " << time.current() << std::endl;
+        std::cout << "Target F[0][0]: " << Fbar[0][0] << std::endl;
+        std::cout << "Average Deformation: \n" << avg_deformation << std::endl;
+        std::cout << "Average Stress: \n" << avg_stress << std::endl;
 
         output_results();
         time.increment();
@@ -872,6 +894,23 @@ void RVE_SF<dim>::make_grid()
 
     std::cout << "Mesh Generated" << std::endl;
     
+    // Material Assignment 
+
+    double x_boundary = 0.5 * parameters.scale;
+    double y_boundary = 0.5 * parameters.scale;
+
+    for (auto cell = triangulation.begin_active(); cell != triangulation.end(); ++cell)
+    {
+        Point<dim> cell_loc = cell->center();
+
+        if (cell_loc[0] < x_boundary)
+            cell->set_material_id(0);
+        else
+            cell->set_material_id(1);
+    }
+
+
+    std::cout << "Material ID's Set" << std::endl;
     
 }
 
@@ -894,6 +933,7 @@ void RVE_SF<dim>::setup_system()
     u_total.reinit(dof_handler.n_dofs());
     system_rhs.reinit(dof_handler.n_dofs());
     solution = 0;
+    u_total = 0;
 
     std::cout << " - Finding Perioidic Faces" << std::endl;
 
@@ -1005,7 +1045,6 @@ void RVE_SF<dim>::setup_system()
             
     }
 
-    if(parameters.file_output_mode)
     {
         const std::map<dealii::types::global_dof_index, dealii::Point<dim>>
             dof_location_map = dealii::DoFTools::map_dofs_to_support_points(
@@ -1042,17 +1081,38 @@ void RVE_SF<dim>::apply_boundary_conditions()
     std::vector<Point<dim>> support_points(dof_handler.n_dofs());
     DoFTools::map_dofs_to_support_points(MappingQ1<dim>(), dof_handler, support_points);
 
-    if (time.current() == 0)
+
+    Tensor<2, dim> F_previous = unit_symmetric_tensor<dim>();
+    if (time.get_timestep() > 0)
     {
-        Fbar[0][0] += 0.0;
+        double previous_strain = 0.12 * (time.current() - time.get_delta_t()) / time.end();
+        F_previous[0][0] = 1.0 + previous_strain;
+        F_previous[1][1] = 1.0;
+        F_previous[2][2] = 1.0;
+
+        F_previous[0][1] = 0; F_previous[1][0] = 0;
+        F_previous[0][2] = 0; F_previous[2][0] = 0;
+        F_previous[1][2] = 0; F_previous[2][1] = 0;
+
     }
-    else
-    {
-        Fbar[0][0] += 0.0025;
-        Fbar[1][1] -= 0.00125;
-        Fbar[2][2] -= 0.00125;
-    }
-    
+
+
+    Tensor<2, dim> F_target = unit_symmetric_tensor<dim>();
+    double total_strain = 0.12 * time.current() / time.end();
+    F_target[0][0] = 1.0 + total_strain;
+    F_target[1][1] = 1.0;
+    F_target[2][2] = 1.0;
+
+    F_target[0][1] = 0; F_target[1][0] = 0;
+    F_target[0][2] = 0; F_target[2][0] = 0;
+    F_target[1][2] = 0; F_target[2][1] = 0;
+
+    Fbar = F_target;
+
+    Tensor<2, dim> F_increment = F_target - F_previous;
+
+
+
 
     const double tol = 1e-12; // Tolerance for floating point comparison
 
@@ -1078,7 +1138,7 @@ void RVE_SF<dim>::apply_boundary_conditions()
         /* --- lambda that imposes affine periodicity ------------------- */
         auto match_periodic = [&](const std::vector<unsigned int> &side1,
                                 const std::vector<unsigned int> &side2,
-                                const unsigned int periodic_coord) // 0=x,1=y
+                                const unsigned int periodic_coord) 
         {
             for (unsigned int i1 : side1)
             {
@@ -1105,12 +1165,18 @@ void RVE_SF<dim>::apply_boundary_conditions()
                         const auto dof1 = point_to_dof[p1][comp];   // master
                         const auto dof2 = point_to_dof[p2][comp];   // slave
 
+                        /*
+                        if (constraints.is_constrained(dof1))
+                        {
+                                                        continue;
+                        }
+                        */
+
                         constraints.add_line(dof1);
                         constraints.add_entry(dof1, dof2, 1.0);
 
-                        const double rhs =
-                            ((Fbar - unit_symmetric_tensor<dim>()) * 
-                            (p1 - p2))[comp];
+                        const double rhs = ((F_increment) * (p1 - p2))[comp];
+
                         constraints.set_inhomogeneity(dof1, rhs);
 
                         /*
@@ -1134,13 +1200,29 @@ void RVE_SF<dim>::apply_boundary_conditions()
     if (dim == 3) match_periodic(back_dofs, front_dofs, 2);   // z-direction periodicity (coord=2)
 
 
+    /*
     for (unsigned int &dof : fixed_dofs)
     {
         constraints.add_line(dof);   // fix u_x at (0,0)
         constraints.set_inhomogeneity(dof, 0.0);
     }
+    */
 
     constraints.close();
+
+    std::cout << "Target Strain: " << total_strain << std::endl;
+    std::cout << "Number of constraints: " << constraints.n_constraints() << std::endl;
+
+
+    {
+    const std::map<dealii::types::global_dof_index, dealii::Point<dim>>
+        dof_location_map = dealii::DoFTools::map_dofs_to_support_points(
+            dealii::MappingQ1<dim>(), dof_handler);
+    std::ofstream dof_location_file("dof_numbering.gnuplot");
+    dealii::DoFTools::write_gnuplot_dof_support_point_info(dof_location_file, dof_location_map);
+    std::cout << "Wrote DoF support point info to dof_numbering.gnuplot" << std::endl;
+    }
+
 
     DynamicSparsityPattern dsp(dof_handler.n_dofs());
     DoFTools::make_sparsity_pattern(dof_handler, dsp, constraints,
@@ -1181,7 +1263,7 @@ void RVE_SF<dim>::assemble_system()
 
     MappingQEulerian<dim,Vector<double>> mapping(parameters.poly_degree, dof_handler, u_total);
 
-    FEValues<dim> fe_values(mapping, fe, quadrature, update_values | update_gradients | update_quadrature_points | update_JxW_values);
+    FEValues<dim> fe_values(fe, quadrature, update_values | update_gradients | update_quadrature_points | update_JxW_values);
     const unsigned int dofs_per_cell = fe.n_dofs_per_cell();
     const unsigned int n_q_points = quadrature.size();
     const FEValuesExtractors::Vector displacements(0);
@@ -1195,20 +1277,26 @@ void RVE_SF<dim>::assemble_system()
         cell_matrix = 0.0;
         cell_rhs = 0.0;
         fe_values.reinit(cell);
+        unsigned int mat_id = cell->material_id();
 
+
+        std::vector<Tensor<2,dim>> local_total_gradients(n_q_points);
         std::vector<Tensor<2,dim>> local_solution_gradients(n_q_points);
+        fe_values[displacements].get_function_gradients(u_total, local_total_gradients);
         fe_values[displacements].get_function_gradients(solution, local_solution_gradients);
+
 
         for (unsigned int q = 0; q < n_q_points; ++q)
         {
-            Tensor<2, dim> u_grad = local_solution_gradients[q];
+
+            Tensor<2, dim> u_grad = local_total_gradients[q] + local_solution_gradients[q];
             Tensor<2, dim> F = Physics::Elasticity::Kinematics::F(u_grad);
 
             const double Jcrit = 0.0;                     // keep it positive
             if (determinant(F) <= Jcrit)
             throw ExcMessage("detF too small");
 
-            material.update_material(F);
+            material.update_material(F, mat_id);
 
             // Material Stress and tangent
             const Tensor<2, dim> P = material.compute_P(); //material.analytical_P(); 
@@ -1291,23 +1379,22 @@ void RVE_SF<dim>::assemble_system()
         std::cout << "ERROR: Non-finite entries detected in system matrix or RHS!" << std::endl;
     }
 }
-    #include <deal.II/lac/sparse_direct.h>
-    #include <deal.II/lac/precondition.h>
+
 
 template <int dim>
 void RVE_SF<dim>::solve_linear_system()
 {
     std::cout << "Solving linear system (" << parameters.type_lin << ")\n";
 
-    // Incremental update Δu
-    Vector<double> solution_increment(dof_handler.n_dofs());
+    // Storing old solution before computing newton update
+    Vector<double> old_solution = solution; 
 
     if (parameters.type_lin == "Direct")
     {
         // Direct LU factorization
         SparseDirectUMFPACK direct;
         direct.initialize(tangent_matrix);
-        direct.vmult(solution_increment, system_rhs);
+        direct.vmult(solution, system_rhs);
     }
     else if (parameters.type_lin == "CG")
     {
@@ -1320,171 +1407,157 @@ void RVE_SF<dim>::solve_linear_system()
         {
             PreconditionSSOR<SparseMatrix<double>> prec;
             prec.initialize(tangent_matrix, parameters.preconditioner_relaxation);
-            cg.solve(tangent_matrix, solution_increment, system_rhs, prec);
+            cg.solve(tangent_matrix, solution, system_rhs, prec);
         }
         else  // jacobi
         {
             PreconditionJacobi<SparseMatrix<double>> prec;
             prec.initialize(tangent_matrix, parameters.preconditioner_relaxation);
-            cg.solve(tangent_matrix, solution_increment, system_rhs, prec);
+            cg.solve(tangent_matrix, solution, system_rhs, prec);
         }
 
         std::cout << " - CG took " << control.last_step() << " iterations\n";
     }
-    else if (parameters.type_lin == "GMRES")
-    {
-        const double r0 = system_rhs.l2_norm();
-        const double tol_abs = parameters.tol_lin * r0;
-        std::cout << "   GMRES: initial |r| = " << r0
-                << ", tol_abs = " << tol_abs << std::endl;
-
-   const unsigned int max_steps =
-     dof_handler.n_dofs() * parameters.max_iterations_lin;
-   // abs_tol = 0, rel_tol = tol_lin
-   SolverControl control(max_steps,
-                         /*abs_tol=*/0.0,
-                         /*rel_tol=*/parameters.tol_lin);
-        SolverGMRES<Vector<double>> gmres(control);
-
-        PreconditionSSOR<SparseMatrix<double>> prec;
-        prec.initialize(tangent_matrix, parameters.preconditioner_relaxation);
-
-        gmres.solve(tangent_matrix, solution_increment, system_rhs, prec);
-        std::cout << " - GMRES took " << control.last_step() << " iterations\n";
-    }
     else  
     {
-        SolverControl control(dof_handler.n_dofs() * parameters.max_iterations_lin,
-                      parameters.tol_lin * system_rhs.l2_norm());
-        SolverMinRes<Vector<double>> minres(control);
-
-        PreconditionIdentity preconditioner;
-        minres.solve(tangent_matrix, solution_increment, system_rhs, preconditioner);
+        std::cout << " SOLVER TYPE NOT IMPLIMENTED" << std::endl;
     }
 
-    
-    constraints.distribute(solution_increment);
-    solution += solution_increment;
+    constraints.distribute(solution);
+    solution += old_solution;
 }
 
 template <int dim>
 void RVE_SF<dim>::solve_nonlinear()
 {
-    std::cout << "Starting Nonlinear Solver" << std::endl;
-
-    const double c_armijo = 1e-4;   // Armijo slope‑fraction
-    const double beta     = 0.5;    // back‑tracking factor (α ← β α)
-
+    const double c_armijo = 1e-4;   // Less aggressive than 1e-4
+    const double beta = 0.5;        // Less aggressive than 0.5
+    const double min_alpha = 1e-8;  // Minimum step size
+        
     unsigned int iteration = 0;
-
+    double residual_norm = 0.0;
+    double initial_residual = 0.0;
+    
     while (iteration < parameters.max_iterations_NR)
     {
-        std::cout << " - Newton iteration " << iteration << std::endl;
 
-        
+        // Assemble system with current total displacement
+        Vector<double> current_total = u_total;
+        current_total += solution;
 
-        /* residual & tangent at current guess ------------------------ */
+        // Temporarily update u_total for assembly
+        Vector<double> u_total_backup = u_total;
+        u_total = current_total;
+
         assemble_system();
         const double R0 = system_rhs.l2_norm();
-        std::cout << "   - Residual norm: " << R0 << std::endl;
 
-        if (R0 < parameters.tol_f)                      // ‖R‖ small enough
+        // Restore u_total
+        u_total = u_total_backup;
+
+        // Check initial residual
+        if (iteration == 0)
+        {
+            initial_residual = R0;
+            if (initial_residual < parameters.tol_f)
+            {
+                std::cout << "   - Initial residual already converged\n";
+                return;
+            }
+        }
+
+        std::cout << "  Iteration " << iteration 
+                << ": |R| = " << R0  // Add residual to output
+                << ", |u_total| = " << u_total.l2_norm()
+                << ", |solution| = " << solution.l2_norm() << std::endl;
+
+
+        
+        if (R0 < parameters.tol_f)
         {
             std::cout << "   - Converged: force residual criterion\n";
             return;
         }
-
-        /* keep current solution ------------------------------------- */
+        
         Vector<double> old_solution = solution;
-
-        /* solve  K Δu = -R  (solve_linear_system adds full Δu) ------- */
         solve_linear_system();
-
-        /* store full increment -------------------------------------- */
         Vector<double> du = solution;
         du -= old_solution;
 
-        /* line search ----------------------------------------------- */
-        double alpha = 1.0;
-        bool   accepted = false;
-
-        for (unsigned int ls = 0; ls < 20; ++ls)        // max 10 trials
-        {
-            /* trial solution = old + α Δu */
-            solution  = old_solution;
-            solution.add(alpha, du);
-            constraints.distribute(solution);           // enforce BCs
-
-            try
-            {
-                assemble_system();                      // R( trial )
-            }
-            catch (const dealii::ExceptionBase &)
-            {
-                /* element inverted (J≤0) → shrink step */
-                alpha *= beta;
-                continue;
-            }
-
-            const double R_trial = system_rhs.l2_norm();
-
-            /* Armijo condition: sufficient decrease */
-            if (R_trial <= (1.0 - c_armijo * alpha) * R0)
-            {
-                accepted = true;
-                std::cout << "   - step accepted: α = " << alpha
-                          << " , |R| = " << R_trial << std::endl;
-                break;
-            }
-
-            alpha *= beta;                             // cut step
-        }
-
-        if (!accepted)
-        {
-            std::cout << "   - Line search failed → abort\n";
-            break;
-        }
-
-        /* update norm for displacement criterion -------------------- */
-        const double update_norm = alpha * du.l2_norm();
-        std::cout << "   - Newton update norm: " << update_norm << std::endl;
-
+        double update_norm = du.l2_norm();
         if (update_norm < parameters.tol_u)
         {
-            std::cout << "   - Converged: displacement criterion\n";
+            std::cout << "   - Converged: displacement update criterion\n";
             return;
         }
 
+        
+        // More robust line search for large deformations
+        double alpha = 1.0;
+        bool accepted = false;
+        
+        for (unsigned int ls = 0; ls < 30; ++ls)  // More line search attempts
+        {
+            solution = old_solution;
+            solution.add(alpha, du);
+            constraints.distribute(solution);
+            
+            Vector<double> u_total_backup_ls = u_total;
+
+            try
+            {
+
+                // Same u total logic as main
+                Vector<double> trial_total = u_total;
+                trial_total += solution;
 
 
+                u_total = trial_total;
 
+                assemble_system();
+                const double R_trial = system_rhs.l2_norm();
+                u_total = u_total_backup_ls;
+                
+                // Armijo condition with additional stability check
+                if (R_trial <= (1.0 - c_armijo * alpha) * R0 && 
+                    R_trial < 10.0 * R0)  // Prevent divergence
+                {
+                    accepted = true;
+                    std::cout << "   - Line search: alpha = " << alpha 
+                      << ", |R_trial| = " << R_trial << std::endl;
+                    break;
+                }
+            }
+            catch (const dealii::ExceptionBase &)
+            {
+                u_total = u_total_backup_ls;
+                std::cout << "   - Line search: alpha = " << alpha 
+                  << " caused assembly failure" << std::endl;
+            }
+            
+            alpha *= beta;
+            if (alpha < min_alpha) break;
+        }
+        
+        if (!accepted)
+        {
+            // Adaptive time step reduction
+            std::cout << "Line search failed - consider reducing time step\n";
+            return;
+        }
+        
         ++iteration;
     }
-
-    std::cout << "Warning: Nonlinear solver did not converge in "
-              << parameters.max_iterations_NR << " iterations!\n";
 }
+
 
 template<int dim>
-void RVE_SF<dim>::move_mesh()
+void RVE_SF<dim>::update_total_displacement()
 {
-    std::cout << "Moving Mesh to reflect deformation" << std::endl;
-
-    std::vector<bool> vertex_touched(triangulation.n_vertices(), false);
-    for (auto &cell : dof_handler.active_cell_iterators())
-        for( const auto v : cell->vertex_indices())
-            if (vertex_touched[cell->vertex_index(v)] == false)
-            {
-                vertex_touched[cell->vertex_index(v)] = true;
-
-                Point<dim> vertex_displacement;
-                for (unsigned int d = 0; d < dim; ++d)
-                    vertex_displacement[d] = solution(cell->vertex_dof_index(v,d));
-                
-                cell->vertex(v) += vertex_displacement;
-            }
+    std::cout << "Updating total displacement field" << std::endl;
+    u_total += solution;
 }
+
 
 template <int dim>
 void RVE_SF<dim>::output_results()
@@ -1492,12 +1565,15 @@ void RVE_SF<dim>::output_results()
   DataOut<dim> data_out;
   data_out.attach_dof_handler(dof_handler);
 
+  // Material IDs
+  Vector<double> material_ids(triangulation.n_active_cells());
+
   /* nodal displacement ------------------------------------------------ */
   std::vector<std::string> names(dim);
   for (unsigned int d=0; d<dim; ++d) names[d]="u_"+Utilities::int_to_string(d,1);
   std::vector<DataComponentInterpretation::DataComponentInterpretation>
       inter(dim, DataComponentInterpretation::component_is_part_of_vector);
-  data_out.add_data_vector(solution, names, DataOut<dim>::type_dof_data, inter);
+  data_out.add_data_vector(u_total, names, DataOut<dim>::type_dof_data, inter);
 
   /* cell‑wise tensor components --------------------------------------- */
   const unsigned int n_cells = triangulation.n_active_cells();
@@ -1513,12 +1589,16 @@ void RVE_SF<dim>::output_results()
   for (const auto &cell : dof_handler.active_cell_iterators())
   {
     fe_values.reinit(cell);
+    unsigned int mat_id = cell->material_id();
+    material_ids[c] = mat_id;
+
     std::vector<Tensor<2,dim>> grad_u(quadrature.size());
-    fe_values[disp].get_function_gradients(solution, grad_u);
+    fe_values[disp].get_function_gradients(u_total, grad_u);
 
     const Tensor<2,dim> Fq = Physics::Elasticity::Kinematics::F(grad_u[0]);
-    material.update_material(const_cast<Tensor<2,dim>&>(Fq));
-    const Tensor<2,dim> Pq = material.compute_P();
+    const Tensor<2,dim> Fq_inv = invert(Fq);
+    material.update_material(const_cast<Tensor<2,dim>&>(Fq), mat_id);
+    const Tensor<2,dim> Pq = Fq_inv * material.compute_P();
 
     F_xx[c]=Fq[0][0]; F_xy[c]=Fq[0][1];
     F_yx[c]=Fq[1][0]; F_yy[c]=Fq[1][1];
@@ -1527,15 +1607,17 @@ void RVE_SF<dim>::output_results()
     ++c;
   }
 
+  data_out.add_data_vector(material_ids, "Material_id", DataOut<dim>::type_cell_data);
+
   data_out.add_data_vector(F_xx,"F_xx",DataOut<dim>::type_cell_data);
   data_out.add_data_vector(F_xy,"F_xy",DataOut<dim>::type_cell_data);
   data_out.add_data_vector(F_yx,"F_yx",DataOut<dim>::type_cell_data);
   data_out.add_data_vector(F_yy,"F_yy",DataOut<dim>::type_cell_data);
 
-  data_out.add_data_vector(P_xx,"P_xx",DataOut<dim>::type_cell_data);
-  data_out.add_data_vector(P_xy,"P_xy",DataOut<dim>::type_cell_data);
-  data_out.add_data_vector(P_yx,"P_yx",DataOut<dim>::type_cell_data);
-  data_out.add_data_vector(P_yy,"P_yy",DataOut<dim>::type_cell_data);
+  data_out.add_data_vector(P_xx,"Pk2_xx",DataOut<dim>::type_cell_data);
+  data_out.add_data_vector(P_xy,"Pk2_xy",DataOut<dim>::type_cell_data);
+  data_out.add_data_vector(P_yx,"Pk2_yx",DataOut<dim>::type_cell_data);
+  data_out.add_data_vector(P_yy,"Pk2_yy",DataOut<dim>::type_cell_data);
 
   /* write the .vtu ----------------------------------------------------- */
   data_out.build_patches(parameters.poly_degree);
@@ -1565,7 +1647,7 @@ Tensor<2, dim> RVE_SF<dim>::compute_avg_deformation()
             fe_values.reinit(cell);
 
                 std::vector<Tensor<2,dim>> grad_u(quadrature.size());
-                fe_values[displacement].get_function_gradients(solution, grad_u);
+                fe_values[displacement].get_function_gradients(u_total, grad_u);
 
             for (unsigned int q = 0; q < n_q_size; ++q)
             {
@@ -1596,19 +1678,21 @@ Tensor<2, dim> RVE_SF<dim>::compute_avg_stress()
     for (const auto &cell : dof_handler.active_cell_iterators())
         {
             fe_values.reinit(cell);
+            unsigned int mat_id = cell->material_id();
 
                 std::vector<Tensor<2,dim>> grad_u(quadrature.size());
-                fe_values[displacement].get_function_gradients(solution, grad_u);
+                fe_values[displacement].get_function_gradients(u_total, grad_u);
 
             for (const unsigned int q_point : fe_values.quadrature_point_indices())
             {
                 const Tensor<2,dim> F_q =
                     Physics::Elasticity::Kinematics::F(grad_u[q_point]); 
-                material.update_material(const_cast<Tensor<2,dim>&>(F_q)); 
-                const Tensor<2,dim> P_q = material.analytical_P();            
+                material.update_material(const_cast<Tensor<2,dim>&>(F_q), mat_id); 
+                const Tensor<2, dim> F_q_inv = invert(F_q);
+                const Tensor<2,dim> P_q = material.compute_P();            
 
                 const double dV = fe_values.JxW(q_point); 
-                PM += P_q * dV;
+                PM += F_q_inv* P_q * dV;
                 v0 += dV;
             }
         }
